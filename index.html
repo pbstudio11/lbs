@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="zh-HK" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ESP32 Leeds Smart Monitor</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <!-- Google Fonts: Space Mono & JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            mono: ['"JetBrains Mono"', '"Share Tech Mono"', 'monospace'],
+          },
+          colors: {
+            oled: {
+              black: '#05070a',
+              card: '#0d1117',
+              border: '#30363d',
+              white: '#f0f6fc',
+              dim: '#8b949e',
+              blue: '#38bdf8', // 巴士數字專用高亮藍色
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    body {
+      background-color: #05070a;
+      color: #f0f6fc;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    
+    /* ESP32 OLED Screen Scanlines Simulation */
+    .oled-screen {
+      position: relative;
+      background: radial-gradient(circle at center, #0f172a 0%, #05070a 100%);
+      box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.9), 0 0 25px rgba(56, 189, 248, 0.15);
+    }
+    .oled-screen::after {
+      content: " ";
+      display: block;
+      position: absolute;
+      top: 0; left: 0; bottom: 0; right: 0;
+      background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%);
+      background-size: 100% 4px;
+      z-index: 20;
+      pointer-events: none;
+      opacity: 0.5;
+    }
+
+    /* Subtle pulsing LED for ESP32 Status */
+    @keyframes led-pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.3; transform: scale(0.85); }
+    }
+    .led-green {
+      animation: led-pulse 2s infinite ease-in-out;
+    }
+
+    /* Custom Blue Highlight for Bus No & Minutes */
+    .bus-blue-text {
+      color: #38bdf8 !important;
+      text-shadow: 0 0 8px rgba(56, 189, 248, 0.5);
+    }
+
+    /* Custom Scrollbar for Forecast horizontally */
+    .no-scrollbar::-webkit-scrollbar {
+      display: none;
+    }
+    .no-scrollbar {
+      -ms-overflow-style: none;
+      scrollbar-width: none;
+    }
+
+    /* Smooth Spin Animation for Reload */
+    .spin-anim {
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body class="min-h-screen p-3 md:p-8 flex flex-col items-center">
+
+  <!-- Main ESP32 Frame Device Outer Shell (加寬 max-w-7xl) -->
+  <div class="w-full max-w-7xl bg-[#161b22] border-2 border-[#30363d] rounded-2xl p-4 md:p-8 shadow-2xl relative overflow-hidden my-auto">
+    
+    <!-- Top Hardware Header Bar (ESP32 Board Infos) -->
+    <div class="flex flex-wrap items-center justify-between border-b border-[#30363d] pb-4 mb-6 gap-3 text-xs md:text-sm text-oled-dim">
+      <div class="flex items-center gap-3">
+        <span class="w-3.5 h-3.5 rounded-full bg-emerald-500 inline-block led-green"></span>
+        <span class="font-bold text-oled-white tracking-wider">ESP32-S3-WROOM</span>
+        <span class="hidden sm:inline border-l border-[#30363d] pl-3">RSSI: -52dBm</span>
+        <span class="hidden md:inline border-l border-[#30363d] pl-3">HEAP: 248KB FREE</span>
+        <span class="border-l border-[#30363d] pl-3 font-mono" id="uptime-counter">UPTIME: 00:00:00</span>
+      </div>
+
+      <!-- Controls: Language Switcher & "整你個制" Button -->
+      <div class="flex items-center gap-3">
+        <!-- Language Switcher -->
+        <button id="lang-toggle-btn" type="button" onclick="toggleLanguage()" class="px-3 py-1.5 bg-[#21262d] hover:bg-[#30363d] text-oled-white border border-[#30363d] rounded-md text-xs transition flex items-center gap-1.5 font-semibold cursor-pointer">
+          <i data-lucide="languages" class="w-4 h-4"></i>
+          <span id="lang-label">繁體中文</span>
+        </button>
+
+        <!-- "整你個制" Reload Button -->
+        <button id="reload-btn" type="button" onclick="handleManualReload()" class="px-4 py-1.5 bg-oled-white text-black hover:bg-gray-200 font-bold rounded-md text-xs md:text-sm transition flex items-center gap-2 shadow-sm active:scale-95 cursor-pointer">
+          <span id="reload-label">整你個制</span>
+          <i data-lucide="rotate-cw" id="reload-icon" class="w-4 h-4 inline-block"></i>
+        </button>
+      </div>
+    </div>
+
+    <!-- Inner OLED Screen Container -->
+    <div class="oled-screen rounded-xl border border-[#30363d] p-5 md:p-8 space-y-8">
+
+      <!-- SECTION 1: UK DATE & TIME (24-Hour Format) -->
+      <section class="border-b border-[#30363d]/60 pb-6">
+        <div class="flex items-center justify-between mb-3">
+          <div class="flex items-center gap-2 text-oled-dim text-xs md:text-sm tracking-widest uppercase font-semibold">
+            <i data-lucide="clock" class="w-4 h-4 text-oled-white"></i>
+            <span data-i18n="sec1_title">01 // 英國日期與時間 (UK Date & Time)</span>
+          </div>
+          <span class="text-xs bg-[#161b22] border border-[#30363d] text-emerald-400 px-2.5 py-1 rounded-md uppercase font-mono">24-HR SYSTEM</span>
+        </div>
+        
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between bg-oled-card border border-[#30363d] p-5 md:p-6 rounded-xl">
+          <div>
+            <div id="uk-date" class="text-xl md:text-2xl font-bold tracking-wide text-oled-white">----.--.-- (---)</div>
+            <div class="text-xs md:text-sm text-oled-dim mt-1" id="uk-timezone-lbl">Europe/London (BST/GMT)</div>
+          </div>
+          <div id="uk-time" class="text-5xl md:text-7xl font-extrabold tracking-tight text-oled-white mt-3 sm:mt-0 font-mono">
+            00:00:00
+          </div>
+        </div>
+      </section>
+
+      <!-- SECTION 2: LEEDS WEATHER FORECAST (NOW + NEXT 11 HOURS) -->
+      <section class="border-b border-[#30363d]/60 pb-6">
+        <div class="flex items-center justify-between mb-4">
+          <div class="flex items-center gap-2 text-oled-dim text-xs md:text-sm tracking-widest uppercase font-semibold">
+            <i data-lucide="cloud-sun" class="w-4 h-4 text-oled-white"></i>
+            <span data-i18n="sec2_title">02 // 利茲天氣資訊 (Leeds Weather - 12 Hours)</span>
+          </div>
+          <div class="text-xs text-oled-dim flex items-center gap-1.5">
+            <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+            <span data-i18n="auto_15m">每 15 分鐘自動更新</span>
+            <span id="weather-last-update" class="ml-1 text-oled-white font-mono">(--:--)</span>
+          </div>
+        </div>
+
+        <!-- Weather Display Horizontal Grid -->
+        <div id="weather-container" class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-12 gap-3 overflow-x-auto no-scrollbar">
+          <!-- Weather items injected via JS -->
+          <div class="col-span-full py-8 text-center text-xs text-oled-dim animate-pulse">
+            <i data-lucide="loader" class="w-5 h-5 mx-auto mb-2 animate-spin"></i>
+            正在載入英國天文台數據...
+          </div>
+        </div>
+      </section>
+
+      <!-- SECTION 3: LEEDS CITY BUS STATION LIVE DEPARTURES -->
+      <section class="border-b border-[#30363d]/60 pb-6">
+        <div class="flex items-center justify-between mb-4">
+          <div class="flex items-center gap-2 text-oled-dim text-xs md:text-sm tracking-widest uppercase font-semibold">
+            <i data-lucide="bus" class="w-4 h-4 text-oled-white"></i>
+            <span data-i18n="sec3_title">03 // 利茲市中心巴士總站 (Leeds City Bus Station)</span>
+          </div>
+          <div class="text-xs text-oled-dim flex items-center gap-1.5">
+            <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+            <span data-i18n="auto_3m">每 3 分鐘自動更新</span>
+            <span id="bus-last-update" class="ml-1 text-oled-white font-mono">(--:--)</span>
+          </div>
+        </div>
+
+        <!-- Bus Departure Table Container -->
+        <div class="bg-oled-card border border-[#30363d] rounded-xl overflow-hidden">
+          <div class="overflow-x-auto">
+            <table class="w-full text-left text-xs md:text-sm border-collapse">
+              <thead>
+                <tr class="border-b border-[#30363d] bg-[#161b22] text-oled-dim font-semibold uppercase">
+                  <th class="py-3 px-4" data-i18n="th_bus_no">巴士號碼</th>
+                  <th class="py-3 px-4" data-i18n="th_dest">目的地</th>
+                  <th class="py-3 px-4" data-i18n="th_stand">月台 (Stand)</th>
+                  <th class="py-3 px-4" data-i18n="th_time">本班時間</th>
+                  <th class="py-3 px-4 text-right" data-i18n="th_due">倒數預計 (本班 | 次班)</th>
+                </tr>
+              </thead>
+              <tbody id="bus-table-body" class="divide-y divide-[#30363d]/50">
+                <!-- Bus rows injected via JS -->
+                <tr>
+                  <td colspan="5" class="py-12 text-center text-oled-dim animate-pulse">
+                    <i data-lucide="loader" class="w-6 h-6 mx-auto mb-2 animate-spin"></i>
+                    正在抓取巴士動態數據...
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- SECTION 4: WORLD CLOCKS (HONG KONG, LOS ANGELES, NEW YORK) -->
+      <section>
+        <div class="flex items-center justify-between mb-4">
+          <div class="flex items-center gap-2 text-oled-dim text-xs md:text-sm tracking-widest uppercase font-semibold">
+            <i data-lucide="globe" class="w-4 h-4 text-oled-white"></i>
+            <span data-i18n="sec4_title">04 // 世界時鐘 (World Clock - 24HR)</span>
+          </div>
+          <div class="text-xs text-oled-dim flex items-center gap-1.5">
+            <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+            <span data-i18n="auto_3m">每 3 分鐘精確校準</span>
+            <span id="clock-last-update" class="ml-1 text-oled-white font-mono">(--:--)</span>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <!-- Hong Kong -->
+          <div class="bg-oled-card border border-[#30363d] p-4 md:p-5 rounded-xl flex flex-col justify-between">
+            <div class="flex justify-between items-center mb-2">
+              <span class="text-base font-bold text-oled-white" data-i18n="city_hk">香港 (Hong Kong)</span>
+              <span class="text-xs px-2 py-0.5 bg-[#161b22] border border-[#30363d] text-oled-dim rounded">HKT (UTC+8)</span>
+            </div>
+            <div id="time-hk" class="text-3xl font-black text-oled-white tracking-wider my-2 font-mono">--:--:--</div>
+            <div id="date-hk" class="text-xs text-oled-dim">----.--.--</div>
+          </div>
+
+          <!-- Los Angeles -->
+          <div class="bg-oled-card border border-[#30363d] p-4 md:p-5 rounded-xl flex flex-col justify-between">
+            <div class="flex justify-between items-center mb-2">
+              <span class="text-base font-bold text-oled-white" data-i18n="city_la">洛杉磯 (Los Angeles)</span>
+              <span class="text-xs px-2 py-0.5 bg-[#161b22] border border-[#30363d] text-oled-dim rounded">PT (UTC-7/8)</span>
+            </div>
+            <div id="time-la" class="text-3xl font-black text-oled-white tracking-wider my-2 font-mono">--:--:--</div>
+            <div id="date-la" class="text-xs text-oled-dim">----.--.--</div>
+          </div>
+
+          <!-- New York -->
+          <div class="bg-oled-card border border-[#30363d] p-4 md:p-5 rounded-xl flex flex-col justify-between">
+            <div class="flex justify-between items-center mb-2">
+              <span class="text-base font-bold text-oled-white" data-i18n="city_ny">紐約 (New York)</span>
+              <span class="text-xs px-2 py-0.5 bg-[#161b22] border border-[#30363d] text-oled-dim rounded">ET (UTC-4/5)</span>
+            </div>
+            <div id="time-ny" class="text-3xl font-black text-oled-white tracking-wider my-2 font-mono">--:--:--</div>
+            <div id="date-ny" class="text-xs text-oled-dim">----.--.--</div>
+          </div>
+        </div>
+      </section>
